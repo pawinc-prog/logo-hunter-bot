@@ -1,0 +1,10 @@
+yt-dlp
+apify-client
+opencv-python-headless
+torch
+torchvision
+gspread
+google-auth
+Pillow
+requests
+numpy
