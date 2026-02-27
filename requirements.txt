@@ -8,3 +8,4 @@ google-auth
 Pillow
 requests
 numpy
+google-api-python-client
