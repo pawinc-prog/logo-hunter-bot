@@ -18,24 +18,27 @@ import gspread
 from PIL import Image
 from torchvision import transforms
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # --- ดึงรหัสความลับจาก GitHub Secrets ---
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
-IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID") # ใช้ Folder ID แทน ImgBB
 
 BASE_PATH = './'
 MODEL_PATH = os.path.join(BASE_PATH, 'bigc_model.pth')
 BKK_TZ = timezone(timedelta(hours=7))
 device = torch.device("cpu")
 
-# --- Authentication ---
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+# --- Authentication (Sheet & Drive) ---
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 try:
     creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
     gc = gspread.authorize(creds)
+    drive_service = build('drive', 'v3', credentials=creds)
 except Exception as e:
     print(f"❌ Error Auth: {e}")
     sys.exit(1)
@@ -94,17 +97,30 @@ def predict_logo(model, frame):
     return False, 0.0, None
 
 def save_evidence(image_pil, video_id, timestamp_str):
+    """ฟังก์ชันอัปโหลดรูปลง Google Drive ผ่าน API"""
     try:
         safe_ts = str(timestamp_str).replace(":", "_")
-        local_path = f"DETECT_{video_id}_{safe_ts}.jpg"
-        image_pil.save(local_path)
-        with open(local_path, "rb") as file:
-            res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY}, files={"image": file})
-        if res.status_code == 200:
-            url = res.json()["data"]["url"]
-            return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
-    except Exception as e: print(f" ⚠️ Upload Error: {e}")
-    return "-", "-"
+        local_filename = f"DETECT_{video_id}_{safe_ts}.jpg"
+        image_pil.save(local_filename)
+
+        if not GDRIVE_FOLDER_ID:
+            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID")
+            return "-", "-"
+
+        file_metadata = {'name': local_filename, 'parents': [GDRIVE_FOLDER_ID]}
+        media = MediaFileUpload(local_filename, mimetype='image/jpeg', resumable=True)
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+        
+        # ตั้งค่าให้ใครก็ตามที่มีลิงก์สามารถดูรูปได้ (แชร์ลิงก์ให้ LINE)
+        drive_service.permissions().create(fileId=file.get('id'), body={'type': 'anyone', 'role': 'reader'}).execute()
+        
+        url = file.get('webViewLink')
+        os.remove(local_filename) # ลบรูปในเซิร์ฟเวอร์ทิ้งเพื่อประหยัดพื้นที่
+        
+        return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
+    except Exception as e: 
+        print(f" ⚠️ Upload Error: {e}")
+        return "-", "-"
 
 def fetch_data(platforms, keywords, max_res, days_back):
     all_videos = []
@@ -165,7 +181,6 @@ def main():
     config = ws_control.col_values(2)
     status = str(config[0]).strip() if len(config) > 0 else "🔴 Stop"
 
-    # ถ้าระบบขึ้น Stop อยู่ ให้ปิดการทำงานทันที (เพื่อประหยัดโควต้า GitHub)
     if 'Start' not in status and '🟢' not in status:
         print("🛑 Status is Stop. Exiting gracefully.")
         sys.exit(0)
@@ -186,7 +201,7 @@ def main():
     
     print(f"📋 Found: {len(raw_list)} (New: {len(unique_list)} / Dup: {len(duplicate_list)})")
     
-# --- 1. สร้างรายการ Log แบบละเอียดลง Google Sheets ---
+    # --- 1. สร้างรายการ Log แบบละเอียดลง Google Sheets ---
     print("📋 กำลังบันทึก Log รายละเอียด...")
     new_text = "\n".join([f"[{u['platform']}] {str(u['title']).replace(chr(10), ' ')[:50]}... -> {u['url']}" for u in unique_list])
     dup_text = "\n".join([f"[{d['platform']}] {str(d['title']).replace(chr(10), ' ')[:50]}... -> {d['url']}" for d in duplicate_list])
@@ -241,21 +256,17 @@ def main():
             try: ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
             except: pass
             
-            # เก็บข้อความใส่ตะกร้า (แทนการส่ง LINE เลย)
             line_summary.append(f"[{v['platform']}] {v['user']}\n🎬 {clean_title[:30]}...\n🔗 ลิงก์: {v['url']}\n🖼️ รูป: {img_url}")
         else: print("  ❌ No logo.")
 
     # --- 3. ตรวจสอบตะกร้าและส่ง LINE ทีเดียว ---
     if line_summary:
         print(f"📱 Sending batched LINE message ({len(line_summary)} items)...")
-        display_list = line_summary[:10] # ดึงมาโชว์แค่ 10 อันแรก กันข้อความยาวเกินไปจน LINE Error
+        display_list = line_summary[:10]
         final_msg = f"🚨 แจ้งเตือน! พบโลโก้ใหม่ {len(line_summary)} รายการ:\n" + "="*20 + "\n"
         final_msg += "\n\n".join(display_list)
-        
-        # ถ้าเจอมากกว่า 10 รายการ ให้มีข้อความห้อยท้าย
         if len(line_summary) > 10:
-            final_msg += f"\n\n... และอื่นๆ อีก {len(line_summary) - 10} รายการ\n(กรุณาดูรายละเอียดทั้งหมดใน Google Sheets)"
-            
+            final_msg += f"\n\n... และอื่นๆ อีก {len(line_summary) - 10} รายการ\n(กรุณาดูรายละเอียดใน Google Sheets)"
         send_line_broadcast(final_msg)
 
     if 'Run Once' in str(config[4]): ws_control.update_cell(1, 2, '🔴 Stop')
