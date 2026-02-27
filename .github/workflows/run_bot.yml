@@ -1,8 +1,8 @@
 name: Logo Hunter Automation
 
 on:
-  schedule:
-    - cron: '0 * * * *' # สั่งรันอัตโนมัติทุกๆ ต้นชั่วโมง
+schedule:
+    - cron: '*/10 * * * *' #รัน ทุก ๆ 10 นาที
   workflow_dispatch: # ทำให้เรามีปุ่มกดสั่งรันเองได้ด้วย
 
 jobs:
