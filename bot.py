@@ -185,10 +185,27 @@ def main():
         else: seen.add(v['url']); unique_list.append(v)
     
     print(f"📋 Found: {len(raw_list)} (New: {len(unique_list)} / Dup: {len(duplicate_list)})")
-    try: ws_logs.insert_row([get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'), str(len(duplicate_list)) + " Dups", str(len(unique_list)) + " New", ", ".join(platforms)], index=2)
+    
+    # --- 1. สร้างรายการ Log แบบละเอียดลง Google Sheets ---
+    log_messages = []
+    for v in raw_list:
+        title_short = str(v['title']).replace('\n', ' ')
+        if len(title_short) > 45: title_short = title_short[:45] + "..."
+        log_line = f"[{v['platform']}] {title_short} -> {v['url']}"
+        log_messages.append(log_line)
+        print(log_line)
+        
+    full_log_text = "\n".join(log_messages)
+
+    try: 
+        ws_logs.insert_row([get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'), str(len(duplicate_list)) + " Dups", str(len(unique_list)) + " New", full_log_text], index=2)
     except: pass
 
     engine = load_ai_model()
+    
+    # --- 2. สร้างตะกร้าเก็บข้อความเตรียมส่ง LINE รวดเดียว ---
+    line_summary = []
+
     for v in unique_list:
         print(f"👁️ Scanning: [{v['user']}] - {v['title'][:40]}...")
         found, final_ts, best_img = False, "-", None
@@ -223,8 +240,23 @@ def main():
             clean_title = ("'" + v['title']) if str(v['title']).startswith(('=', '+', '-')) else v['title'].replace('\n', ' ')
             try: ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
             except: pass
-            send_line_broadcast(f"✅ พบข้อมูลอัปเดต [{v['platform']}]\n👤 {v['user']}\n🎬 {clean_title[:45]}...\n🔗 ลิงก์:\n{v['url']}\n🖼️ รูป:\n{img_url}")
+            
+            # เก็บข้อความใส่ตะกร้า (แทนการส่ง LINE เลย)
+            line_summary.append(f"[{v['platform']}] {v['user']}\n🎬 {clean_title[:30]}...\n🔗 ลิงก์: {v['url']}\n🖼️ รูป: {img_url}")
         else: print("  ❌ No logo.")
+
+    # --- 3. ตรวจสอบตะกร้าและส่ง LINE ทีเดียว ---
+    if line_summary:
+        print(f"📱 Sending batched LINE message ({len(line_summary)} items)...")
+        display_list = line_summary[:10] # ดึงมาโชว์แค่ 10 อันแรก กันข้อความยาวเกินไปจน LINE Error
+        final_msg = f"🚨 แจ้งเตือน! พบโลโก้ใหม่ {len(line_summary)} รายการ:\n" + "="*20 + "\n"
+        final_msg += "\n\n".join(display_list)
+        
+        # ถ้าเจอมากกว่า 10 รายการ ให้มีข้อความห้อยท้าย
+        if len(line_summary) > 10:
+            final_msg += f"\n\n... และอื่นๆ อีก {len(line_summary) - 10} รายการ\n(กรุณาดูรายละเอียดทั้งหมดใน Google Sheets)"
+            
+        send_line_broadcast(final_msg)
 
     if 'Run Once' in str(config[4]): ws_control.update_cell(1, 2, '🔴 Stop')
     print("✅ Run Complete. Serverless container will now self-destruct.")
