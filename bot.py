@@ -1,0 +1,233 @@
+import os
+import sys
+import time
+import random
+import warnings
+import requests
+import numpy as np
+from datetime import datetime, timedelta, timezone
+
+warnings.filterwarnings("ignore")
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import yt_dlp
+from apify_client import ApifyClient
+import cv2
+import torch
+import gspread
+from PIL import Image
+from torchvision import transforms
+from google.oauth2.service_account import Credentials
+
+# --- ดึงรหัสความลับจาก GitHub Secrets ---
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
+LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
+SHEET_ID = os.environ.get("SHEET_ID")
+IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY")
+
+BASE_PATH = './'
+MODEL_PATH = os.path.join(BASE_PATH, 'bigc_model.pth')
+BKK_TZ = timezone(timedelta(hours=7))
+device = torch.device("cpu")
+
+# --- Authentication ---
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+try:
+    creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+    gc = gspread.authorize(creds)
+except Exception as e:
+    print(f"❌ Error Auth: {e}")
+    sys.exit(1)
+
+def get_bkk_now(): return datetime.now(BKK_TZ)
+
+def format_to_bkk(date_input):
+    try:
+        if isinstance(date_input, (int, float)):
+            val = date_input if date_input < 1e11 else date_input / 1000.0
+            dt = datetime.fromtimestamp(val, timezone.utc)
+        else:
+            clean_str = str(date_input).replace('Z', '+00:00').replace("'", "").strip()
+            dt = datetime.fromisoformat(clean_str[:19] + '+00:00')
+        return dt.astimezone(BKK_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    except: return str(date_input).replace("'", "").strip()
+
+def send_line_broadcast(message):
+    if not LINE_ACCESS_TOKEN: return
+    try:
+        requests.post(
+            "https://api.line.me/v2/bot/message/broadcast",
+            headers={"Authorization": f"Bearer {LINE_ACCESS_TOKEN}", "Content-Type": "application/json"},
+            json={"messages": [{"type": "text", "text": message}]}
+        )
+    except: pass
+
+def update_heartbeat(ws_control):
+    try: ws_control.update_cell(9, 2, get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'))
+    except: pass
+
+def load_ai_model():
+    if os.path.exists(MODEL_PATH):
+        m = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+        if hasattr(m, 'eval'): m.eval()
+        print("🧠 AI Model: ONLINE")
+        return m
+    print("⚠️ Model not found")
+    return None
+
+def predict_logo(model, frame):
+    if model is None: return False, 0.0, None
+    try:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(cv2.resize(rgb, (224, 224)))
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)), transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+        with torch.no_grad():
+            output = model(transform(pil_img).unsqueeze(0).to(device))
+            prob = torch.nn.functional.softmax(output[0], dim=0)
+            conf, pred = torch.max(prob, 0)
+        if pred.item() == 0 and conf.item() > 0.85: return True, conf.item(), Image.fromarray(rgb)
+    except: pass
+    return False, 0.0, None
+
+def save_evidence(image_pil, video_id, timestamp_str):
+    try:
+        safe_ts = str(timestamp_str).replace(":", "_")
+        local_path = f"DETECT_{video_id}_{safe_ts}.jpg"
+        image_pil.save(local_path)
+        with open(local_path, "rb") as file:
+            res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_API_KEY}, files={"image": file})
+        if res.status_code == 200:
+            url = res.json()["data"]["url"]
+            return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
+    except Exception as e: print(f" ⚠️ Upload Error: {e}")
+    return "-", "-"
+
+def fetch_data(platforms, keywords, max_res, days_back):
+    all_videos = []
+    client = ApifyClient(APIFY_TOKEN)
+    cutoff_utc = datetime.now(timezone.utc) - timedelta(days=days_back)
+    
+    for plat in platforms:
+        for kw in keywords:
+            print(f"📡 Searching '{kw}' on {plat}...")
+            try:
+                if plat == 'YouTube':
+                    params = {'part': 'snippet', 'q': kw, 'key': YOUTUBE_API_KEY, 'maxResults': max_res, 'type': 'video', 'publishedAfter': cutoff_utc.isoformat().replace('+00:00', 'Z')}
+                    res = requests.get("https://www.googleapis.com/youtube/v3/search", params=params).json()
+                    for item in res.get('items', []):
+                        all_videos.append({
+                            'url': f"https://www.youtube.com/watch?v={item['id']['videoId']}",
+                            'title': item['snippet']['title'], 'platform': 'YouTube',
+                            'user': item['snippet']['channelTitle'], 'date': format_to_bkk(item['snippet']['publishedAt']),
+                            'image_url': item['snippet']['thumbnails']['high']['url'], 'id': item['id']['videoId']
+                        })
+                else:
+                    actor = {'TikTok': 'clockworks/tiktok-scraper', 'Instagram': 'apify/instagram-hashtag-scraper', 'Facebook': 'apify/facebook-search-scraper'}.get(plat)
+                    if not actor: continue
+                    inp = {"resultsLimit": max_res, "maxItems": max_res, "resultsPerPage": max_res, "proxyConfiguration": {"useApifyProxy": True}}
+                    if plat in ['TikTok', 'Instagram']: inp["hashtags"] = [kw.replace(" ","")]
+                    else: inp["searchTerms"] = kw
+                    
+                    run = client.actor(actor).call(run_input=inp, timeout_secs=90)
+                    for item in client.dataset(run["defaultDatasetId"]).list_items().items:
+                        raw_date = item.get('createTime') or item.get('timestamp') or item.get('date')
+                        try:
+                            if isinstance(raw_date, (int, float)): dt_utc = datetime.fromtimestamp(raw_date if raw_date < 1e11 else raw_date/1000.0, timezone.utc)
+                            else: dt_utc = datetime.fromisoformat(str(raw_date).replace('Z', '+00:00')[:19] + '+00:00')
+                            if dt_utc < cutoff_utc: continue 
+                        except: pass
+
+                        user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or "Unknown"
+                        v_url = item.get('webVideoUrl') or item.get('videoWebUrl') or item.get('url') or item.get('postUrl')
+                        if not v_url and plat == 'TikTok' and item.get('id'): v_url = f"https://www.tiktok.com/@{user}/video/{item.get('id')}"
+                            
+                        if v_url:
+                            all_videos.append({
+                                'url': v_url, 'title': (item.get('text') or item.get('desc') or "No Title")[:200], 'platform': plat, 'user': user,
+                                'date': format_to_bkk(raw_date), 'id': str(item.get('id', random.randint(1,9999))),
+                                'image_url': item.get('displayUrl') or item.get('imageUrl') or item.get('coverUrl')
+                            })
+            except Exception as e: print(f" ⚠️ {plat} Fetch Error: {e}")
+    return all_videos
+
+def main():
+    sh = gc.open_by_key(SHEET_ID)
+    ws_data = sh.worksheet("Apify")
+    ws_control = sh.worksheet("Control_Panel")
+    try: ws_logs = sh.worksheet("Scan_Logs")
+    except: ws_logs = sh.add_worksheet(title="Scan_Logs", rows=1000, cols=4)
+
+    update_heartbeat(ws_control)
+    config = ws_control.col_values(2)
+    status = str(config[0]).strip() if len(config) > 0 else "🔴 Stop"
+
+    # ถ้าระบบขึ้น Stop อยู่ ให้ปิดการทำงานทันที (เพื่อประหยัดโควต้า GitHub)
+    if 'Start' not in status and '🟢' not in status:
+        print("🛑 Status is Stop. Exiting gracefully.")
+        sys.exit(0)
+
+    platforms = [p.strip() for p in config[1].split(',')]
+    keywords = [k.strip() for k in config[2].split(',')]
+    days_back = 1 if '1' in str(config[3]) else 7 if '2' in str(config[3]) else 30
+    max_res = int(config[6]) if str(config[6]).isdigit() else 5
+    
+    print(f"\n🚀 Serverless Mode Activated: {get_bkk_now().strftime('%H:%M:%S')}")
+    raw_list = fetch_data(platforms, keywords, max_res, days_back)
+    processed_urls = set(ws_data.col_values(7)[1:]) 
+    
+    unique_list, duplicate_list, seen = [], [], set()
+    for v in raw_list:
+        if v['url'] in processed_urls or v['url'] in seen: duplicate_list.append(v)
+        else: seen.add(v['url']); unique_list.append(v)
+    
+    print(f"📋 Found: {len(raw_list)} (New: {len(unique_list)} / Dup: {len(duplicate_list)})")
+    try: ws_logs.insert_row([get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'), str(len(duplicate_list)) + " Dups", str(len(unique_list)) + " New", ", ".join(platforms)], index=2)
+    except: pass
+
+    engine = load_ai_model()
+    for v in unique_list:
+        print(f"👁️ Scanning: [{v['user']}] - {v['title'][:40]}...")
+        found, final_ts, best_img = False, "-", None
+
+        try:
+            with yt_dlp.YoutubeDL({'format': 'best', 'quiet': True}) as ydl:
+                stream = ydl.extract_info(v['url'], download=False).get('url')
+                if stream:
+                    cap = cv2.VideoCapture(stream)
+                    for i in range(150): 
+                        ret, frame = cap.read()
+                        if not ret: break
+                        if i % 30 == 0:
+                            hit, sc, img = predict_logo(engine, frame)
+                            if hit:
+                                found, best_img, final_ts = True, img, f"{int((i//30)//60):02d}:{int((i//30)%60):02d}"
+                                break
+                    cap.release()
+        except: pass
+
+        if not found and v.get('image_url'):
+            try:
+                resp = requests.get(v['image_url'], timeout=10)
+                img = cv2.imdecode(np.asarray(bytearray(resp.content), dtype=np.uint8), cv2.IMREAD_COLOR)
+                hit, sc, img_res = predict_logo(engine, img)
+                if hit: found, best_img, final_ts = True, img_res, "Image"
+            except: pass
+
+        if found:
+            print(f"  🎯 Logo Found!")
+            formula, img_url = save_evidence(best_img, v['id'], final_ts)
+            clean_title = ("'" + v['title']) if str(v['title']).startswith(('=', '+', '-')) else v['title'].replace('\n', ' ')
+            try: ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
+            except: pass
+            send_line_broadcast(f"✅ พบข้อมูลอัปเดต [{v['platform']}]\n👤 {v['user']}\n🎬 {clean_title[:45]}...\n🔗 ลิงก์:\n{v['url']}\n🖼️ รูป:\n{img_url}")
+        else: print("  ❌ No logo.")
+
+    if 'Run Once' in str(config[4]): ws_control.update_cell(1, 2, '🔴 Stop')
+    print("✅ Run Complete. Serverless container will now self-destruct.")
+
+if __name__ == "__main__":
+    main()
