@@ -24,7 +24,9 @@ jobs:
         run: wget "https://github.com/pawinc-prog/logo-hunter-bot/releases/download/v1.0/bigc_model.pth" -O bigc_model.pth
 
       - name: สร้างกุญแจเข้า Google Sheets
-        run: echo "${{ secrets.GCP_CREDENTIALS }}" > credentials.json
+        env:
+          GCP_KEY: ${{ secrets.GCP_CREDENTIALS }}
+        run: echo "$GCP_KEY" > credentials.json
 
       - name: สตาร์ทเครื่องยนต์ Logo Hunter! 🚀
         env:
