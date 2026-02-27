@@ -186,20 +186,20 @@ def main():
     
     print(f"📋 Found: {len(raw_list)} (New: {len(unique_list)} / Dup: {len(duplicate_list)})")
     
-    # --- 1. สร้างรายการ Log แบบละเอียดลง Google Sheets ---
-    log_messages = []
-    for v in raw_list:
-        title_short = str(v['title']).replace('\n', ' ')
-        if len(title_short) > 45: title_short = title_short[:45] + "..."
-        log_line = f"[{v['platform']}] {title_short} -> {v['url']}"
-        log_messages.append(log_line)
-        print(log_line)
-        
-    full_log_text = "\n".join(log_messages)
+# --- 1. สร้างรายการ Log แบบละเอียดลง Google Sheets ---
+    print("📋 กำลังบันทึก Log รายละเอียด...")
+    new_text = "\n".join([f"[{u['platform']}] {str(u['title']).replace(chr(10), ' ')[:50]}... -> {u['url']}" for u in unique_list])
+    dup_text = "\n".join([f"[{d['platform']}] {str(d['title']).replace(chr(10), ' ')[:50]}... -> {d['url']}" for d in duplicate_list])
 
     try: 
-        ws_logs.insert_row([get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'), str(len(duplicate_list)) + " Dups", str(len(unique_list)) + " New", full_log_text], index=2)
-    except: pass
+        ws_logs.insert_row([
+            get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'), 
+            dup_text if dup_text else "-", 
+            new_text if new_text else "-", 
+            ", ".join(platforms)
+        ], index=2)
+    except Exception as e:
+        print(f"⚠️ บันทึก Log ไม่สำเร็จ: {e}")
 
     engine = load_ai_model()
     
