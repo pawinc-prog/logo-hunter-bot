@@ -22,16 +22,18 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ==========================================
-# ⚙️ เปิด-ปิด ระบบ Test Message ส่งเข้า LINE ทุกรอบ
-ENABLE_STATUS_MESSAGE = True # เปลี่ยนเป็น False ถ้าไม่อยากให้มันส่งรายงานทุกครั้งที่รัน
+# ⚙️ เปิด-ปิด ระบบ Test Message ส่งเข้า Google Chat ทุกรอบ
+ENABLE_STATUS_MESSAGE = True
 # ==========================================
 
-# --- ดึงรหัสความลับจาก GitHub Secrets ---
+# --- การตั้งค่า API และ Webhook ---
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
-LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID") # ใช้ Folder ID สำหรับ Google Drive
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
+
+# 🔴 ลิงก์ Webhook Google Chat ของคุณ
+GOOGLE_CHAT_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAQAGsvHT0c/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=_gjfX3kZs7NEU6fxNYYTvVkhZFEC7WkwfEdxZ0fvKTw"
 
 BASE_PATH = './'
 MODEL_PATH = os.path.join(BASE_PATH, 'bigc_model.pth')
@@ -61,22 +63,23 @@ def format_to_bkk(date_input):
         return dt.astimezone(BKK_TZ).strftime('%Y-%m-%d %H:%M:%S')
     except: return str(date_input).replace("'", "").strip()
 
-def send_line_broadcast(message):
-    if not LINE_ACCESS_TOKEN: 
-        print("⚠️ LINE_ACCESS_TOKEN is missing!")
+def send_google_chat_message(message):
+    """ส่งข้อความเข้า Google Chat ผ่าน Webhook"""
+    if not GOOGLE_CHAT_WEBHOOK: 
+        print("⚠️ GOOGLE_CHAT_WEBHOOK is missing!")
         return
     try:
         res = requests.post(
-            "https://api.line.me/v2/bot/message/broadcast",
-            headers={"Authorization": f"Bearer {LINE_ACCESS_TOKEN}", "Content-Type": "application/json"},
-            json={"messages": [{"type": "text", "text": message}]}
+            GOOGLE_CHAT_WEBHOOK,
+            headers={"Content-Type": "application/json"},
+            json={"text": message}
         )
         if res.status_code != 200:
-            print(f"⚠️ LINE API Error: {res.text}")
+            print(f"⚠️ Google Chat API Error: {res.text}")
         else:
-            print("✅ ส่ง LINE สำเร็จ!")
+            print("✅ ส่ง Google Chat สำเร็จ!")
     except Exception as e: 
-        print(f"⚠️ LINE Send Exception: {e}")
+        print(f"⚠️ Google Chat Send Exception: {e}")
 
 def update_heartbeat(ws_control):
     try: ws_control.update_cell(9, 2, get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -116,14 +119,13 @@ def save_evidence(image_pil, video_id, timestamp_str):
         image_pil.save(local_filename)
 
         if not GDRIVE_FOLDER_ID:
-            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID ใน GitHub Secrets")
+            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID (ยังไม่ได้ตั้งค่าใน Secrets)")
             return "-", "-"
 
         file_metadata = {'name': local_filename, 'parents': [GDRIVE_FOLDER_ID]}
         media = MediaFileUpload(local_filename, mimetype='image/jpeg', resumable=True)
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
         
-        # ปลดล็อกแชร์ลิงก์
         drive_service.permissions().create(fileId=file.get('id'), body={'type': 'anyone', 'role': 'reader'}).execute()
         
         url = file.get('webViewLink')
@@ -229,7 +231,7 @@ def main():
         print(f"⚠️ บันทึก Log ไม่สำเร็จ: {e}")
 
     engine = load_ai_model()
-    line_summary = []
+    chat_summary = []
 
     # --- 2. สแกนหาโลโก้ ---
     for v in unique_list:
@@ -267,35 +269,35 @@ def main():
             try: ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
             except: pass
             
-            line_summary.append(f"[{v['platform']}] {v['user']}\n🎬 {clean_title[:30]}...\n🔗 ลิงก์: {v['url']}\n🖼️ รูป: {img_url}")
+            chat_summary.append(f"[{v['platform']}] {v['user']}\n🎬 {clean_title[:30]}...\n🔗 ลิงก์: {v['url']}\n🖼️ รูป: {img_url}")
         else: print("  ❌ No logo.")
 
-    # --- 3. ส่ง LINE (Alert) ถ้าเจอโลโก้ ---
-    if line_summary:
-        print(f"📱 Sending batched LINE message ({len(line_summary)} items)...")
-        display_list = line_summary[:10]
-        final_msg = f"🚨 แจ้งเตือน! พบโลโก้ใหม่ {len(line_summary)} รายการ:\n" + "="*20 + "\n"
+    # --- 3. ส่ง Google Chat (Alert) ถ้าเจอโลโก้ ---
+    if chat_summary:
+        print(f"📱 Sending batched Google Chat message ({len(chat_summary)} items)...")
+        display_list = chat_summary[:10]
+        final_msg = f"🚨 แจ้งเตือน! พบโลโก้ใหม่ {len(chat_summary)} รายการ:\n" + "="*20 + "\n"
         final_msg += "\n\n".join(display_list)
-        if len(line_summary) > 10:
-            final_msg += f"\n\n... และอื่นๆ อีก {len(line_summary) - 10} รายการ\n(ดูต่อใน Google Sheets)"
-        send_line_broadcast(final_msg)
+        if len(chat_summary) > 10:
+            final_msg += f"\n\n... และอื่นๆ อีก {len(chat_summary) - 10} รายการ\n(ดูต่อใน Google Sheets)"
+        send_google_chat_message(final_msg)
 
-    # --- 4. 🧪 ส่ง Test Message สรุปสถานะ (ส่งทุกครั้งที่มีการรัน) ---
+    # --- 4. 🧪 ส่ง Test Message สรุปสถานะ ---
     if ENABLE_STATUS_MESSAGE and len(raw_list) > 0:
         latest = raw_list[0]
         test_msg = (
-            f"🤖 [System Test]\n"
+            f"🤖 [System Test: GitHub Bot]\n"
             f"เวลา: {get_bkk_now().strftime('%H:%M:%S')}\n"
             f"ดึงข้อมูลทั้งหมด: {len(raw_list)} คลิป\n"
             f"คัดกรองคลิปใหม่: {len(unique_list)} คลิป\n"
-            f"เจอโลโก้รอบนี้: {len(line_summary)} คลิป\n"
+            f"เจอโลโก้รอบนี้: {len(chat_summary)} คลิป\n"
             f"{'='*20}\n"
             f"📌 ตัวอย่างข้อมูลล่าสุดที่ดูดมาได้:\n"
             f"[{latest['platform']}] {latest['user']}\n"
             f"🎬 {str(latest['title']).replace(chr(10), ' ')[:40]}...\n"
             f"🔗 {latest['url']}"
         )
-        send_line_broadcast(test_msg)
+        send_google_chat_message(test_msg)
 
     if 'Run Once' in str(config[4]): ws_control.update_cell(1, 2, '🔴 Stop')
     print("✅ Run Complete. Serverless container will now self-destruct.")
