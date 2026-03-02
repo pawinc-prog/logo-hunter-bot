@@ -171,7 +171,7 @@ def fetch_data(platforms, keywords, max_res, days_back):
                             if dt_utc < cutoff_utc: continue 
                         except: pass
 
-                        user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or "Unknown"
+                        user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or item.get('authorMeta') or "Unknown"
                         v_url = item.get('webVideoUrl') or item.get('videoWebUrl') or item.get('url') or item.get('postUrl')
                         if not v_url and plat == 'TikTok' and item.get('id'): v_url = f"https://www.tiktok.com/@{user}/video/{item.get('id')}"
                             
