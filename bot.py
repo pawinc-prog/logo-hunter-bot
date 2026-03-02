@@ -22,7 +22,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ==========================================
-# ⚙️ เปิด-ปิด ระบบส่งข้อความสรุปเข้า Google Chat
+# ⚙️ เปิด-ปิด ระบบ Test Message ส่งเข้า Google Chat ทุกรอบ
 ENABLE_STATUS_MESSAGE = True
 # ==========================================
 
@@ -231,7 +231,7 @@ def main():
         print(f"⚠️ บันทึก Log ไม่สำเร็จ: {e}")
 
     engine = load_ai_model()
-    chat_summary = [] # เก็บเฉพาะรายการที่เจอโลโก้
+    chat_summary = []
 
     # แจ้งเตือนถ้า AI หายไปจาก GitHub
     if engine is None:
@@ -242,7 +242,6 @@ def main():
         print(f"👁️ Scanning: [{v['user']}] - {v['title'][:40]}...")
         found, final_ts, best_img = False, "-", None
         
-        # ถ้าไม่มี AI ให้ข้ามการดูวิดีโอไปเลย
         if engine is None:
             print("  ⏭️ ข้ามการสแกน เพราะไม่มีไฟล์ AI Model")
             continue
@@ -262,7 +261,7 @@ def main():
                                 break
                     cap.release()
         except Exception as e: 
-            print(f"  ⚠️ Video Extract Error: {e}") # ปริ้น Error เผื่อวิดีโอดึงไม่ได้
+            print(f"  ⚠️ Video Extract Error: {e}")
 
         if not found and v.get('image_url'):
             try:
@@ -273,22 +272,27 @@ def main():
             except Exception as e: 
                 pass
 
+        # 🔧 ตั้งค่าข้อมูลเตรียมบันทึกลง Sheet
+        clean_title = ("'" + v['title']) if str(v['title']).startswith(('=', '+', '-')) else v['title'].replace('\n', ' ')
+        
         if found:
             print(f"  🎯 Logo Found!")
             formula, img_url = save_evidence(best_img, v['id'], final_ts)
-            clean_title = ("'" + v['title']) if str(v['title']).startswith(('=', '+', '-')) else v['title'].replace('\n', ' ')
-            
-            # 🔧 เช็ค Error เวลายัดลง Sheet (แก้ปัญหา TikTok ลงไม่ได้)
-            try: 
-                ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
-                print("  📝 บันทึกลง Sheet 'Apify' สำเร็จ!")
-            except Exception as sheet_err: 
-                print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
-            
+            detect_status = "Yes"
             chat_summary.append({'url': v['url'], 'img_url': img_url})
-        else: print("  ❌ No logo.")
+        else:
+            print("  ❌ No logo.")
+            formula, img_url = "-", "-"
+            detect_status = "No"
 
-    # --- 3. จัดรูปแบบข้อความส่งเข้า Google Chat (แบบใหม่ที่คุณต้องการ) ---
+        # 🔧 บันทึกลง Sheet 'Apify' เสมอ (ไม่ว่าจะเจอโลโก้หรือไม่ก็ตาม)
+        try: 
+            ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], detect_status, final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
+            print(f"  📝 บันทึกลง Sheet 'Apify' สำเร็จ! (สถานะ: {detect_status})")
+        except Exception as sheet_err: 
+            print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
+
+    # --- 3. จัดรูปแบบข้อความส่งเข้า Google Chat ---
     if ENABLE_STATUS_MESSAGE or len(chat_summary) > 0:
         msg = f"📊 อัปเดตข้อมูลจาก Logo Hunter\n"
         msg += f"🔗 แพลตฟอร์ม: {', '.join(platforms)}\n"
@@ -305,7 +309,7 @@ def main():
                 msg += f"• ... และอื่นๆ อีก {len(chat_summary) - 15} รายการ\n"
         elif unique_list:
             msg += f"🎯 พบโลโก้: 0 โพสต์\n\n"
-            msg += "📌 ลิงก์โพสต์ใหม่ :\n"
+            msg += "📌 ลิงก์โพสต์ใหม่ (ส่งตรวจสอบแล้ว):\n"
             for u in unique_list[:15]:
                 msg += f"• {u['url']}\n"
             if len(unique_list) > 15:
