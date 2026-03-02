@@ -22,7 +22,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ==========================================
-# ⚙️ เปิด-ปิด ระบบ Test Message ส่งเข้า Google Chat ทุกรอบ
+# ⚙️ เปิด-ปิด ระบบส่งข้อความสรุปเข้า Google Chat
 ENABLE_STATUS_MESSAGE = True
 # ==========================================
 
@@ -231,15 +231,24 @@ def main():
         print(f"⚠️ บันทึก Log ไม่สำเร็จ: {e}")
 
     engine = load_ai_model()
-    chat_summary = []
+    chat_summary = [] # เก็บเฉพาะรายการที่เจอโลโก้
 
-    # --- 2. สแกนหาโลโก้ ---
+    # แจ้งเตือนถ้า AI หายไปจาก GitHub
+    if engine is None:
+        send_google_chat_message("🚨 [System Error] ไม่พบไฟล์โมเดล AI (bigc_model.pth) ใน GitHub บอทจึงไม่สามารถสแกนโลโก้ได้!")
+
+    # --- 2. สแกนหาโลโก้ด้วย AI ---
     for v in unique_list:
         print(f"👁️ Scanning: [{v['user']}] - {v['title'][:40]}...")
         found, final_ts, best_img = False, "-", None
+        
+        # ถ้าไม่มี AI ให้ข้ามการดูวิดีโอไปเลย
+        if engine is None:
+            print("  ⏭️ ข้ามการสแกน เพราะไม่มีไฟล์ AI Model")
+            continue
 
         try:
-            with yt_dlp.YoutubeDL({'format': 'best', 'quiet': True}) as ydl:
+            with yt_dlp.YoutubeDL({'format': 'best', 'quiet': True, 'nocheckcertificate': True, 'socket_timeout': 10}) as ydl:
                 stream = ydl.extract_info(v['url'], download=False).get('url')
                 if stream:
                     cap = cv2.VideoCapture(stream)
@@ -252,7 +261,8 @@ def main():
                                 found, best_img, final_ts = True, img, f"{int((i//30)//60):02d}:{int((i//30)%60):02d}"
                                 break
                     cap.release()
-        except: pass
+        except Exception as e: 
+            print(f"  ⚠️ Video Extract Error: {e}") # ปริ้น Error เผื่อวิดีโอดึงไม่ได้
 
         if not found and v.get('image_url'):
             try:
@@ -260,44 +270,49 @@ def main():
                 img = cv2.imdecode(np.asarray(bytearray(resp.content), dtype=np.uint8), cv2.IMREAD_COLOR)
                 hit, sc, img_res = predict_logo(engine, img)
                 if hit: found, best_img, final_ts = True, img_res, "Image"
-            except: pass
+            except Exception as e: 
+                pass
 
         if found:
             print(f"  🎯 Logo Found!")
             formula, img_url = save_evidence(best_img, v['id'], final_ts)
             clean_title = ("'" + v['title']) if str(v['title']).startswith(('=', '+', '-')) else v['title'].replace('\n', ' ')
-            try: ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
-            except: pass
             
-            chat_summary.append(f"[{v['platform']}] {v['user']}\n🎬 {clean_title[:30]}...\n🔗 ลิงก์: {v['url']}\n🖼️ รูป: {img_url}")
+            # 🔧 เช็ค Error เวลายัดลง Sheet (แก้ปัญหา TikTok ลงไม่ได้)
+            try: 
+                ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], "Yes", final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
+                print("  📝 บันทึกลง Sheet 'Apify' สำเร็จ!")
+            except Exception as sheet_err: 
+                print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
+            
+            chat_summary.append({'url': v['url'], 'img_url': img_url})
         else: print("  ❌ No logo.")
 
-    # --- 3. ส่ง Google Chat (Alert) ถ้าเจอโลโก้ ---
-    if chat_summary:
-        print(f"📱 Sending batched Google Chat message ({len(chat_summary)} items)...")
-        display_list = chat_summary[:10]
-        final_msg = f"🚨 แจ้งเตือน! พบโลโก้ใหม่ {len(chat_summary)} รายการ:\n" + "="*20 + "\n"
-        final_msg += "\n\n".join(display_list)
-        if len(chat_summary) > 10:
-            final_msg += f"\n\n... และอื่นๆ อีก {len(chat_summary) - 10} รายการ\n(ดูต่อใน Google Sheets)"
-        send_google_chat_message(final_msg)
-
-    # --- 4. 🧪 ส่ง Test Message สรุปสถานะ ---
-    if ENABLE_STATUS_MESSAGE and len(raw_list) > 0:
-        latest = raw_list[0]
-        test_msg = (
-            f"🤖 [System Test: GitHub Bot]\n"
-            f"เวลา: {get_bkk_now().strftime('%H:%M:%S')}\n"
-            f"ดึงข้อมูลทั้งหมด: {len(raw_list)} คลิป\n"
-            f"คัดกรองคลิปใหม่: {len(unique_list)} คลิป\n"
-            f"เจอโลโก้รอบนี้: {len(chat_summary)} คลิป\n"
-            f"{'='*20}\n"
-            f"📌 ตัวอย่างข้อมูลล่าสุดที่ดูดมาได้:\n"
-            f"[{latest['platform']}] {latest['user']}\n"
-            f"🎬 {str(latest['title']).replace(chr(10), ' ')[:40]}...\n"
-            f"🔗 {latest['url']}"
-        )
-        send_google_chat_message(test_msg)
+    # --- 3. จัดรูปแบบข้อความส่งเข้า Google Chat (แบบใหม่ที่คุณต้องการ) ---
+    if ENABLE_STATUS_MESSAGE or len(chat_summary) > 0:
+        msg = f"📊 อัปเดตข้อมูลจาก Logo Hunter\n"
+        msg += f"🔗 แพลตฟอร์ม: {', '.join(platforms)}\n"
+        msg += f"📥 ดึงมาทั้งหมด: {len(raw_list)} โพสต์\n"
+        msg += f"✨ ข้อมูลใหม่: {len(unique_list)} โพสต์\n"
+        msg += f"🔁 ข้อมูลซ้ำ: {len(duplicate_list)} โพสต์\n"
+        
+        if chat_summary:
+            msg += f"🎯 พบโลโก้: {len(chat_summary)} โพสต์\n\n"
+            msg += "🚨 ลิงก์โพสต์ที่พบโลโก้:\n"
+            for item in chat_summary[:15]:
+                msg += f"• {item['url']}\n  (🖼️ รูปหลักฐาน: {item['img_url']})\n"
+            if len(chat_summary) > 15:
+                msg += f"• ... และอื่นๆ อีก {len(chat_summary) - 15} รายการ\n"
+        elif unique_list:
+            msg += f"🎯 พบโลโก้: 0 โพสต์\n\n"
+            msg += "📌 ลิงก์โพสต์ใหม่ (รอตรวจสอบ AI):\n"
+            for u in unique_list[:15]:
+                msg += f"• {u['url']}\n"
+            if len(unique_list) > 15:
+                msg += f"• ... และอื่นๆ อีก {len(unique_list) - 15} รายการ\n"
+        
+        msg += "\n✅ ตรวจสอบรายละเอียดได้ใน Sheet Log"
+        send_google_chat_message(msg)
 
     if 'Run Once' in str(config[4]): ws_control.update_cell(1, 2, '🔴 Stop')
     print("✅ Run Complete. Serverless container will now self-destruct.")
