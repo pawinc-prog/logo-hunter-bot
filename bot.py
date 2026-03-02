@@ -305,7 +305,7 @@ def main():
                 msg += f"• ... และอื่นๆ อีก {len(chat_summary) - 15} รายการ\n"
         elif unique_list:
             msg += f"🎯 พบโลโก้: 0 โพสต์\n\n"
-            msg += "📌 ลิงก์โพสต์ใหม่ (รอตรวจสอบ AI):\n"
+            msg += "📌 ลิงก์โพสต์ใหม่ :\n"
             for u in unique_list[:15]:
                 msg += f"• {u['url']}\n"
             if len(unique_list) > 15:
