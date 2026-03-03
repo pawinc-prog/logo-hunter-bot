@@ -4,6 +4,7 @@ import time
 import random
 import warnings
 import requests
+import re
 import numpy as np
 from datetime import datetime, timedelta, timezone
 
@@ -63,23 +64,28 @@ def format_to_bkk(date_input):
         return dt.astimezone(BKK_TZ).strftime('%Y-%m-%d %H:%M:%S')
     except: return str(date_input).replace("'", "").strip()
 
+# 🛡️ ฟังก์ชันใหม่: กรองขยะและป้องกัน Google Sheets บัคจากตัว @ หรือ =
+def sanitize_for_sheets(text):
+    if not text: return "-"
+    # 1. ลบอักขระควบคุม (Control Characters) ที่มองไม่เห็นซึ่งมักแฝงมาใน TikTok
+    clean_text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', str(text))
+    # 2. เอาบรรทัดใหม่ออก
+    clean_text = clean_text.replace('\n', ' ').strip()
+    # 3. ถ้าขึ้นต้นด้วย @ (ชื่อ user) หรือ = (สูตร) ให้ใส่ลูกน้ำ ' ดักไว้ ให้เป็นแค่ข้อความ
+    if clean_text.startswith(('=', '+', '-', '@')):
+        clean_text = f"'{clean_text}"
+    return clean_text
+
 def send_google_chat_message(message):
-    """ส่งข้อความเข้า Google Chat ผ่าน Webhook"""
-    if not GOOGLE_CHAT_WEBHOOK: 
-        print("⚠️ GOOGLE_CHAT_WEBHOOK is missing!")
-        return
+    if not GOOGLE_CHAT_WEBHOOK: return
     try:
         res = requests.post(
             GOOGLE_CHAT_WEBHOOK,
             headers={"Content-Type": "application/json"},
             json={"text": message}
         )
-        if res.status_code != 200:
-            print(f"⚠️ Google Chat API Error: {res.text}")
-        else:
-            print("✅ ส่ง Google Chat สำเร็จ!")
-    except Exception as e: 
-        print(f"⚠️ Google Chat Send Exception: {e}")
+        if res.status_code == 200: print("✅ ส่ง Google Chat สำเร็จ!")
+    except Exception as e: print(f"⚠️ Google Chat Send Exception: {e}")
 
 def update_heartbeat(ws_control):
     try: ws_control.update_cell(9, 2, get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -112,28 +118,22 @@ def predict_logo(model, frame):
     return False, 0.0, None
 
 def save_evidence(image_pil, video_id, timestamp_str):
-    """อัปโหลดรูปลง Google Drive ผ่าน API"""
     try:
         safe_ts = str(timestamp_str).replace(":", "_")
         local_filename = f"DETECT_{video_id}_{safe_ts}.jpg"
         image_pil.save(local_filename)
 
-        if not GDRIVE_FOLDER_ID:
-            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID (ยังไม่ได้ตั้งค่าใน Secrets)")
-            return "-", "-"
+        if not GDRIVE_FOLDER_ID: return "-", "-"
 
         file_metadata = {'name': local_filename, 'parents': [GDRIVE_FOLDER_ID]}
         media = MediaFileUpload(local_filename, mimetype='image/jpeg', resumable=True)
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
         
         drive_service.permissions().create(fileId=file.get('id'), body={'type': 'anyone', 'role': 'reader'}).execute()
-        
         url = file.get('webViewLink')
         os.remove(local_filename)
-        
         return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
     except Exception as e: 
-        print(f" ⚠️ Upload Error: {e}")
         return "-", "-"
 
 def fetch_data(platforms, keywords, max_res, days_back):
@@ -164,6 +164,7 @@ def fetch_data(platforms, keywords, max_res, days_back):
                     
                     run = client.actor(actor).call(run_input=inp, timeout_secs=90)
                     for item in client.dataset(run["defaultDatasetId"]).list_items().items:
+                        # 1. จัดการวันที่
                         raw_date = item.get('createTime') or item.get('timestamp') or item.get('date')
                         try:
                             if isinstance(raw_date, (int, float)): dt_utc = datetime.fromtimestamp(raw_date if raw_date < 1e11 else raw_date/1000.0, timezone.utc)
@@ -171,15 +172,33 @@ def fetch_data(platforms, keywords, max_res, days_back):
                             if dt_utc < cutoff_utc: continue 
                         except: pass
 
-                        user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or item.get('authorMeta') or "Unknown"
+                        # 2. จัดการ User
+                        user = "Unknown"
+                        if isinstance(item.get('authorMeta'), dict):
+                            user = item['authorMeta'].get('name') or item['authorMeta'].get('nickName') or "Unknown"
+                        elif isinstance(item.get('author'), dict):
+                            user = item['author'].get('uniqueId') or item['author'].get('nickname') or "Unknown"
+                        
+                        if user == "Unknown":
+                            user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or "Unknown"
+
+                        # 3. จัดการ Title
+                        title = item.get('text') or item.get('desc') or item.get('title') or "No Title"
+                        if isinstance(title, dict): title = str(title)
+
+                        # 4. จัดการ URL และ ID
+                        item_id = item.get('id') or item.get('video', {}).get('id', str(random.randint(1,9999)))
                         v_url = item.get('webVideoUrl') or item.get('videoWebUrl') or item.get('url') or item.get('postUrl')
-                        if not v_url and plat == 'TikTok' and item.get('id'): v_url = f"https://www.tiktok.com/@{user}/video/{item.get('id')}"
+                        if not v_url and plat == 'TikTok' and item_id: 
+                            v_url = f"https://www.tiktok.com/@{user}/video/{item_id}"
                             
+                        # 5. จัดการ Image URL
+                        image_url = item.get('displayUrl') or item.get('imageUrl') or item.get('coverUrl') or item.get('video', {}).get('cover')
+
                         if v_url:
                             all_videos.append({
-                                'url': v_url, 'title': (item.get('text') or item.get('desc') or "No Title")[:200], 'platform': plat, 'user': user,
-                                'date': format_to_bkk(raw_date), 'id': str(item.get('id', random.randint(1,9999))),
-                                'image_url': item.get('displayUrl') or item.get('imageUrl') or item.get('coverUrl')
+                                'url': str(v_url), 'title': str(title)[:200], 'platform': str(plat), 'user': str(user),
+                                'date': format_to_bkk(raw_date), 'id': str(item_id), 'image_url': str(image_url) if image_url else None
                             })
             except Exception as e: print(f" ⚠️ {plat} Fetch Error: {e}")
     return all_videos
@@ -216,16 +235,15 @@ def main():
     print(f"📋 Found: {len(raw_list)} (New: {len(unique_list)} / Dup: {len(duplicate_list)})")
     
     # --- 1. บันทึก Log รายละเอียด ---
-    print("📋 กำลังบันทึก Log รายละเอียด...")
-    new_text = "\n".join([f"[{u['platform']}] {str(u['title']).replace(chr(10), ' ')[:50]}... -> {u['url']}" for u in unique_list])
-    dup_text = "\n".join([f"[{d['platform']}] {str(d['title']).replace(chr(10), ' ')[:50]}... -> {d['url']}" for d in duplicate_list])
+    new_text = "\n".join([f"[{u['platform']}] {sanitize_for_sheets(u['title'])[:50]}... -> {u['url']}" for u in unique_list])
+    dup_text = "\n".join([f"[{d['platform']}] {sanitize_for_sheets(d['title'])[:50]}... -> {d['url']}" for d in duplicate_list])
 
     try: 
         ws_logs.insert_row([
             get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'), 
-            dup_text if dup_text else "-", 
-            new_text if new_text else "-", 
-            ", ".join(platforms)
+            str(dup_text) if dup_text else "-", 
+            str(new_text) if new_text else "-", 
+            str(", ".join(platforms))
         ], index=2)
     except Exception as e:
         print(f"⚠️ บันทึก Log ไม่สำเร็จ: {e}")
@@ -233,7 +251,6 @@ def main():
     engine = load_ai_model()
     chat_summary = []
 
-    # แจ้งเตือนถ้า AI หายไปจาก GitHub
     if engine is None:
         send_google_chat_message("🚨 [System Error] ไม่พบไฟล์โมเดล AI (bigc_model.pth) ใน GitHub บอทจึงไม่สามารถสแกนโลโก้ได้!")
 
@@ -242,52 +259,64 @@ def main():
         print(f"👁️ Scanning: [{v['user']}] - {v['title'][:40]}...")
         found, final_ts, best_img = False, "-", None
         
-        if engine is None:
-            print("  ⏭️ ข้ามการสแกน เพราะไม่มีไฟล์ AI Model")
-            continue
-
-        try:
-            with yt_dlp.YoutubeDL({'format': 'best', 'quiet': True, 'nocheckcertificate': True, 'socket_timeout': 10}) as ydl:
-                stream = ydl.extract_info(v['url'], download=False).get('url')
-                if stream:
-                    cap = cv2.VideoCapture(stream)
-                    for i in range(150): 
-                        ret, frame = cap.read()
-                        if not ret: break
-                        if i % 30 == 0:
-                            hit, sc, img = predict_logo(engine, frame)
-                            if hit:
-                                found, best_img, final_ts = True, img, f"{int((i//30)//60):02d}:{int((i//30)%60):02d}"
-                                break
-                    cap.release()
-        except Exception as e: 
-            print(f"  ⚠️ Video Extract Error: {e}")
-
-        if not found and v.get('image_url'):
+        if engine is not None:
             try:
-                resp = requests.get(v['image_url'], timeout=10)
-                img = cv2.imdecode(np.asarray(bytearray(resp.content), dtype=np.uint8), cv2.IMREAD_COLOR)
-                hit, sc, img_res = predict_logo(engine, img)
-                if hit: found, best_img, final_ts = True, img_res, "Image"
+                with yt_dlp.YoutubeDL({'format': 'best', 'quiet': True, 'nocheckcertificate': True, 'socket_timeout': 10}) as ydl:
+                    stream = ydl.extract_info(v['url'], download=False).get('url')
+                    if stream:
+                        cap = cv2.VideoCapture(stream)
+                        for i in range(150): 
+                            ret, frame = cap.read()
+                            if not ret: break
+                            if i % 30 == 0:
+                                hit, sc, img = predict_logo(engine, frame)
+                                if hit:
+                                    found, best_img, final_ts = True, img, f"{int((i//30)//60):02d}:{int((i//30)%60):02d}"
+                                    break
+                        cap.release()
             except Exception as e: 
-                pass
+                print(f"  ⚠️ Video Extract Error: {e}")
 
-        # 🔧 ตั้งค่าข้อมูลเตรียมบันทึกลง Sheet
-        clean_title = ("'" + v['title']) if str(v['title']).startswith(('=', '+', '-')) else v['title'].replace('\n', ' ')
+            if not found and v.get('image_url'):
+                try:
+                    resp = requests.get(v['image_url'], timeout=10)
+                    img = cv2.imdecode(np.asarray(bytearray(resp.content), dtype=np.uint8), cv2.IMREAD_COLOR)
+                    hit, sc, img_res = predict_logo(engine, img)
+                    if hit: found, best_img, final_ts = True, img_res, "Image"
+                except Exception as e: 
+                    pass
+
+        # 🛡️ ทำความสะอาดข้อมูลให้เกลี้ยงที่สุด เพื่อไม่ให้ Google Sheets ช็อค!
+        clean_title = sanitize_for_sheets(v.get('title', 'No Title'))
+        clean_user = sanitize_for_sheets(v.get('user', 'Unknown'))
+        clean_platform = sanitize_for_sheets(v.get('platform', '-'))
+        clean_date = sanitize_for_sheets(v.get('date', '-'))
+        clean_url = sanitize_for_sheets(v.get('url', '-'))
         
         if found:
             print(f"  🎯 Logo Found!")
             formula, img_url = save_evidence(best_img, v['id'], final_ts)
             detect_status = "Yes"
-            chat_summary.append({'url': v['url'], 'img_url': img_url})
+            chat_summary.append({'url': clean_url, 'img_url': str(img_url)})
         else:
             print("  ❌ No logo.")
             formula, img_url = "-", "-"
             detect_status = "No"
 
-        # 🔧 บันทึกลง Sheet 'Apify' เสมอ (ไม่ว่าจะเจอโลโก้หรือไม่ก็ตาม)
+        # 🔧 แถวข้อมูลที่จะบันทึก
+        row_data = [
+            clean_date,
+            clean_title,
+            clean_platform,
+            clean_user,
+            str(detect_status),
+            str(final_ts),
+            clean_url,
+            str(formula) # อันนี้ปล่อยให้มี = ได้เพราะเป็นสูตร HYPERLINK จริงๆ
+        ]
+
         try: 
-            ws_data.insert_row([v['date'], clean_title, v['platform'], v['user'], detect_status, final_ts, v['url'], formula], index=2, value_input_option='USER_ENTERED')
+            ws_data.insert_row(row_data, index=2, value_input_option='USER_ENTERED')
             print(f"  📝 บันทึกลง Sheet 'Apify' สำเร็จ! (สถานะ: {detect_status})")
         except Exception as sheet_err: 
             print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
