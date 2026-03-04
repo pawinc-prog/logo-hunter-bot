@@ -36,6 +36,9 @@ GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 # 🔴 ลิงก์ Webhook Google Chat ของคุณ
 GOOGLE_CHAT_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAQAGsvHT0c/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=_gjfX3kZs7NEU6fxNYYTvVkhZFEC7WkwfEdxZ0fvKTw"
 
+# 🔴 WEBHOOK URL ของ Google Chat (ห้อง TikTok เฉพาะ!) **เอาลิงก์ใหม่มาใส่ตรงนี้**
+GOOGLE_CHAT_WEBHOOK_TIKTOK = "https://chat.googleapis.com/v1/spaces/AAQAtSkMPnY/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=WhACImSKOnMpTU-3iyj92I-y6xmDd3KDHZtVY7GehNQ"
+
 BASE_PATH = './'
 MODEL_PATH = os.path.join(BASE_PATH, 'bigc_model.pth')
 BKK_TZ = timezone(timedelta(hours=7))
@@ -64,28 +67,51 @@ def format_to_bkk(date_input):
         return dt.astimezone(BKK_TZ).strftime('%Y-%m-%d %H:%M:%S')
     except: return str(date_input).replace("'", "").strip()
 
-# 🛡️ ฟังก์ชันใหม่: กรองขยะและป้องกัน Google Sheets บัคจากตัว @ หรือ =
 def sanitize_for_sheets(text):
     if not text: return "-"
-    # 1. ลบอักขระควบคุม (Control Characters) ที่มองไม่เห็นซึ่งมักแฝงมาใน TikTok
     clean_text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', str(text))
-    # 2. เอาบรรทัดใหม่ออก
     clean_text = clean_text.replace('\n', ' ').strip()
-    # 3. ถ้าขึ้นต้นด้วย @ (ชื่อ user) หรือ = (สูตร) ให้ใส่ลูกน้ำ ' ดักไว้ ให้เป็นแค่ข้อความ
     if clean_text.startswith(('=', '+', '-', '@')):
         clean_text = f"'{clean_text}"
     return clean_text
 
-def send_google_chat_message(message):
-    if not GOOGLE_CHAT_WEBHOOK: return
+def send_google_chat_message(message, webhook_url):
+    """ส่งข้อความเข้า Google Chat ผ่าน Webhook"""
+    if not webhook_url or not webhook_url.startswith("http"): 
+        print("⚠️ Webhook URL is missing or invalid!")
+        return
     try:
         res = requests.post(
-            GOOGLE_CHAT_WEBHOOK,
+            webhook_url,
             headers={"Content-Type": "application/json"},
             json={"text": message}
         )
-        if res.status_code == 200: print("✅ ส่ง Google Chat สำเร็จ!")
-    except Exception as e: print(f"⚠️ Google Chat Send Exception: {e}")
+        if res.status_code != 200:
+            print(f"⚠️ Google Chat API Error: {res.text}")
+        else:
+            print("✅ ส่ง Google Chat สำเร็จ!")
+    except Exception as e: 
+        print(f"⚠️ Google Chat Send Exception: {e}")
+
+def generate_summary_message(name_group, p_list, raw, unique, dup, chat):
+    if not raw and not unique: return None 
+    msg = f"📊 อัปเดตข้อมูลจาก Logo Hunter ({name_group})\n"
+    msg += f"🔗 แพลตฟอร์ม: {', '.join(p_list)}\n"
+    msg += f"📥 ดึงมาทั้งหมด: {len(raw)} โพสต์\n"
+    msg += f"✨ ข้อมูลใหม่: {len(unique)} โพสต์\n"
+    msg += f"🔁 ข้อมูลซ้ำ: {len(dup)} โพสต์\n"
+    
+    if chat:
+        msg += f"🎯 พบโลโก้: {len(chat)} โพสต์\n\n🚨 ลิงก์โพสต์ที่พบโลโก้:\n"
+        for item in chat[:15]: msg += f"• {item['url']}\n  (🖼️ รูปหลักฐาน: {item['img_url']})\n"
+        if len(chat) > 15: msg += f"• ... และอื่นๆ อีก {len(chat) - 15} รายการ\n"
+    elif unique:
+        msg += f"🎯 พบโลโก้: 0 โพสต์\n\n📌 ลิงก์โพสต์ใหม่ (ส่งตรวจสอบแล้ว):\n"
+        for u in unique[:15]: msg += f"• {u['url']}\n"
+        if len(unique) > 15: msg += f"• ... และอื่นๆ อีก {len(unique) - 15} รายการ\n"
+    
+    msg += "\n✅ ตรวจสอบรายละเอียดได้ใน Sheet Log"
+    return msg
 
 def update_heartbeat(ws_control):
     try: ws_control.update_cell(9, 2, get_bkk_now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -118,22 +144,28 @@ def predict_logo(model, frame):
     return False, 0.0, None
 
 def save_evidence(image_pil, video_id, timestamp_str):
+    """อัปโหลดรูปลง Google Drive ผ่าน API"""
     try:
         safe_ts = str(timestamp_str).replace(":", "_")
         local_filename = f"DETECT_{video_id}_{safe_ts}.jpg"
         image_pil.save(local_filename)
 
-        if not GDRIVE_FOLDER_ID: return "-", "-"
+        if not GDRIVE_FOLDER_ID:
+            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID (ยังไม่ได้ตั้งค่าใน Secrets)")
+            return "-", "-"
 
         file_metadata = {'name': local_filename, 'parents': [GDRIVE_FOLDER_ID]}
         media = MediaFileUpload(local_filename, mimetype='image/jpeg', resumable=True)
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
         
         drive_service.permissions().create(fileId=file.get('id'), body={'type': 'anyone', 'role': 'reader'}).execute()
+        
         url = file.get('webViewLink')
         os.remove(local_filename)
+        
         return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
     except Exception as e: 
+        print(f" ⚠️ Upload Error: {e}")
         return "-", "-"
 
 def fetch_data(platforms, keywords, max_res, days_back):
@@ -252,7 +284,7 @@ def main():
     chat_summary = []
 
     if engine is None:
-        send_google_chat_message("🚨 [System Error] ไม่พบไฟล์โมเดล AI (bigc_model.pth) ใน GitHub บอทจึงไม่สามารถสแกนโลโก้ได้!")
+        send_google_chat_message("🚨 [System Error] ไม่พบไฟล์โมเดล AI (bigc_model.pth) ใน GitHub บอทจึงไม่สามารถสแกนโลโก้ได้!", GOOGLE_CHAT_WEBHOOK)
 
     # --- 2. สแกนหาโลโก้ด้วย AI ---
     for v in unique_list:
@@ -286,7 +318,7 @@ def main():
                 except Exception as e: 
                     pass
 
-        # 🛡️ ทำความสะอาดข้อมูลให้เกลี้ยงที่สุด เพื่อไม่ให้ Google Sheets ช็อค!
+        # 🛡️ ทำความสะอาดข้อมูลให้เกลี้ยงที่สุด
         clean_title = sanitize_for_sheets(v.get('title', 'No Title'))
         clean_user = sanitize_for_sheets(v.get('user', 'Unknown'))
         clean_platform = sanitize_for_sheets(v.get('platform', '-'))
@@ -297,7 +329,7 @@ def main():
             print(f"  🎯 Logo Found!")
             formula, img_url = save_evidence(best_img, v['id'], final_ts)
             detect_status = "Yes"
-            chat_summary.append({'url': clean_url, 'img_url': str(img_url)})
+            chat_summary.append({'url': clean_url, 'img_url': str(img_url), 'platform': clean_platform})
         else:
             print("  ❌ No logo.")
             formula, img_url = "-", "-"
@@ -305,14 +337,9 @@ def main():
 
         # 🔧 แถวข้อมูลที่จะบันทึก
         row_data = [
-            clean_date,
-            clean_title,
-            clean_platform,
-            clean_user,
-            str(detect_status),
-            str(final_ts),
-            clean_url,
-            str(formula) # อันนี้ปล่อยให้มี = ได้เพราะเป็นสูตร HYPERLINK จริงๆ
+            clean_date, clean_title, clean_platform,
+            clean_user, str(detect_status), str(final_ts),
+            clean_url, str(formula) 
         ]
 
         try: 
@@ -321,31 +348,25 @@ def main():
         except Exception as sheet_err: 
             print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
 
-    # --- 3. จัดรูปแบบข้อความส่งเข้า Google Chat ---
+    # ---------------------------------------------------------
+    # 🔧 3. แจ้งเตือน (ห้องหลักรับหมด, ห้องแยกรับเฉพาะ TikTok)
+    # ---------------------------------------------------------
+    
+    # ส่งเข้าห้องหลัก (รวมทุกแพลตฟอร์ม)
     if ENABLE_STATUS_MESSAGE or len(chat_summary) > 0:
-        msg = f"📊 อัปเดตข้อมูลจาก Logo Hunter\n"
-        msg += f"🔗 แพลตฟอร์ม: {', '.join(platforms)}\n"
-        msg += f"📥 ดึงมาทั้งหมด: {len(raw_list)} โพสต์\n"
-        msg += f"✨ ข้อมูลใหม่: {len(unique_list)} โพสต์\n"
-        msg += f"🔁 ข้อมูลซ้ำ: {len(duplicate_list)} โพสต์\n"
-        
-        if chat_summary:
-            msg += f"🎯 พบโลโก้: {len(chat_summary)} โพสต์\n\n"
-            msg += "🚨 ลิงก์โพสต์ที่พบโลโก้:\n"
-            for item in chat_summary[:15]:
-                msg += f"• {item['url']}\n  (🖼️ รูปหลักฐาน: {item['img_url']})\n"
-            if len(chat_summary) > 15:
-                msg += f"• ... และอื่นๆ อีก {len(chat_summary) - 15} รายการ\n"
-        elif unique_list:
-            msg += f"🎯 พบโลโก้: 0 โพสต์\n\n"
-            msg += "📌 ลิงก์โพสต์ใหม่ (ส่งตรวจสอบแล้ว):\n"
-            for u in unique_list[:15]:
-                msg += f"• {u['url']}\n"
-            if len(unique_list) > 15:
-                msg += f"• ... และอื่นๆ อีก {len(unique_list) - 15} รายการ\n"
-        
-        msg += "\n✅ ตรวจสอบรายละเอียดได้ใน Sheet Log"
-        send_google_chat_message(msg)
+        msg_all = generate_summary_message("รวมทุกแพลตฟอร์ม", platforms, raw_list, unique_list, duplicate_list, chat_summary)
+        if msg_all: send_google_chat_message(msg_all, GOOGLE_CHAT_WEBHOOK)
+
+    # ส่งเข้าห้อง TikTok โดยเฉพาะ
+    tk_raw = [x for x in raw_list if x['platform'] == 'TikTok']
+    tk_uni = [x for x in unique_list if x['platform'] == 'TikTok']
+    tk_dup = [x for x in duplicate_list if x['platform'] == 'TikTok']
+    tk_chat = [x for x in chat_summary if x['platform'] == 'TikTok']
+    tk_plats = ['TikTok'] if 'TikTok' in platforms else []
+
+    if tk_plats and (ENABLE_STATUS_MESSAGE or len(tk_chat) > 0):
+        msg_tk = generate_summary_message("TikTok", tk_plats, tk_raw, tk_uni, tk_dup, tk_chat)
+        if msg_tk: send_google_chat_message(msg_tk, GOOGLE_CHAT_WEBHOOK_TIKTOK)
 
     if 'Run Once' in str(config[4]): ws_control.update_cell(1, 2, '🔴 Stop')
     print("✅ Run Complete. Serverless container will now self-destruct.")
