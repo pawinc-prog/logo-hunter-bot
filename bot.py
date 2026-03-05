@@ -23,7 +23,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ==========================================
-# ⚙️ เปิด-ปิด ระบบ Test Message ส่งเข้า Google Chat ทุกรอบ
+# ⚙️ เปิด-ปิด ระบบส่งข้อความสรุปเข้า Google Chat
 ENABLE_STATUS_MESSAGE = True
 # ==========================================
 
@@ -145,12 +145,14 @@ def predict_logo(model, frame):
     return False, 0.0, None
 
 def save_evidence(image_pil, video_id, timestamp_str):
+    """อัปโหลดรูปลง Google Drive ผ่าน API"""
     try:
         safe_ts = str(timestamp_str).replace(":", "_")
         local_filename = f"DETECT_{video_id}_{safe_ts}.jpg"
         image_pil.save(local_filename)
 
         if not GDRIVE_FOLDER_ID:
+            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID (ยังไม่ได้ตั้งค่าใน Secrets)")
             return "-", "-"
 
         file_metadata = {'name': local_filename, 'parents': [GDRIVE_FOLDER_ID]}
@@ -161,8 +163,10 @@ def save_evidence(image_pil, video_id, timestamp_str):
         
         url = file.get('webViewLink')
         os.remove(local_filename)
+        
         return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
     except Exception as e: 
+        print(f" ⚠️ Upload Error: {e}")
         return "-", "-"
 
 def fetch_data(platforms, keywords, max_res, days_back):
@@ -188,9 +192,19 @@ def fetch_data(platforms, keywords, max_res, days_back):
                     actor = {'TikTok': 'clockworks/tiktok-scraper', 'Instagram': 'apify/instagram-hashtag-scraper', 'Facebook': 'apify/facebook-search-scraper'}.get(plat)
                     if not actor: continue
                     inp = {"resultsLimit": max_res, "maxItems": max_res, "resultsPerPage": max_res, "proxyConfiguration": {"useApifyProxy": True}}
-                    if plat in ['TikTok', 'Instagram']: inp["hashtags"] = [kw.replace(" ","")]
-                    else: inp["searchTerms"] = kw
                     
+                    if plat in ['TikTok', 'Instagram']: 
+                        inp["hashtags"] = [kw.replace(" ","")]
+                        if plat == 'TikTok':
+                            # บังคับ TikTok ให้เรียงตามวันที่ล่าสุด (Sort by Date)
+                            inp["sortType"] = 1 # 0: Relevance, 1: Date
+                            inp["searchTerms"] = [kw]
+                            if "hashtags" in inp:
+                                del inp["hashtags"]
+                    else: 
+                        inp["searchTerms"] = kw
+                    
+                    # ⏳ เพิ่มเวลา Timeout ให้ Apify หากใช้แพลตฟอร์มเยอะ
                     run = client.actor(actor).call(run_input=inp, timeout_secs=120)
                     for item in client.dataset(run["defaultDatasetId"]).list_items().items:
                         # 1. Date
@@ -265,6 +279,7 @@ def main():
     print(f"📋 Found: {len(raw_list)} (New: {len(unique_list)} / Dup: {len(duplicate_list)})")
     
     # --- 1. บันทึก Log รายละเอียด ---
+    print("📋 กำลังบันทึก Log รายละเอียด...")
     new_text = "\n".join([f"[{u['platform']}] {sanitize_for_sheets(u['title'])[:50]}... -> {u['url']}" for u in unique_list])
     dup_text = "\n".join([f"[{d['platform']}] {sanitize_for_sheets(d['title'])[:50]}... -> {d['url']}" for d in duplicate_list])
 
@@ -275,6 +290,7 @@ def main():
             str(new_text) if new_text else "-", 
             str(", ".join(platforms))
         ], index=2)
+        time.sleep(2) # ⏳ พักหน่วงเวลา API
     except Exception as e:
         print(f"⚠️ บันทึก Log ไม่สำเร็จ: {e}")
 
@@ -343,7 +359,6 @@ def main():
             clean_url, str(formula) 
         ]
         batch_rows_to_insert.append(row_data)
-        scanned_memory.add(v['url']) if 'scanned_memory' in locals() else None
 
     # 🚀 3. ทำการ BATCH INSERT (เทตะกร้าลง Google Sheets ในคำสั่งเดียว)
     if batch_rows_to_insert:
