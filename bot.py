@@ -193,22 +193,20 @@ def fetch_data(platforms, keywords, max_res, days_back):
                     if not actor: continue
                     inp = {"resultsLimit": max_res, "maxItems": max_res, "resultsPerPage": max_res, "proxyConfiguration": {"useApifyProxy": True}}
                     
+                    # 🔧 นำเอา sortType และ searchTerms ของ TikTok ออก เพื่อป้องกัน Scraper บัค
                     if plat in ['TikTok', 'Instagram']: 
                         inp["hashtags"] = [kw.replace(" ","")]
-                        if plat == 'TikTok':
-                            # บังคับ TikTok ให้เรียงตามวันที่ล่าสุด (Sort by Date)
-                            inp["sortType"] = 1 # 0: Relevance, 1: Date
-                            inp["searchTerms"] = [kw]
-                            if "hashtags" in inp:
-                                del inp["hashtags"]
                     else: 
                         inp["searchTerms"] = kw
                     
                     # ⏳ เพิ่มเวลา Timeout ให้ Apify หากใช้แพลตฟอร์มเยอะ
                     run = client.actor(actor).call(run_input=inp, timeout_secs=120)
                     for item in client.dataset(run["defaultDatasetId"]).list_items().items:
+                        # ข้ามถ้าเป็น Error JSON Object
+                        if not item or 'error' in item: continue
+
                         # 1. Date
-                        raw_date = item.get('createTime') or item.get('timestamp') or item.get('date')
+                        raw_date = item.get('createTime') or item.get('timestamp') or item.get('date') or item.get('create_time')
                         try:
                             if isinstance(raw_date, (int, float)): dt_utc = datetime.fromtimestamp(raw_date if raw_date < 1e11 else raw_date/1000.0, timezone.utc)
                             else: dt_utc = datetime.fromisoformat(str(raw_date).replace('Z', '+00:00')[:19] + '+00:00')
@@ -221,23 +219,27 @@ def fetch_data(platforms, keywords, max_res, days_back):
                             user = item['authorMeta'].get('name') or item['authorMeta'].get('nickName') or "Unknown"
                         elif isinstance(item.get('author'), dict):
                             user = item['author'].get('uniqueId') or item['author'].get('nickname') or "Unknown"
+                        elif isinstance(item.get('author'), str):
+                            user = item['author']
                         
-                        if user == "Unknown":
-                            user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or "Unknown"
+                        if user == "Unknown" or not user:
+                            user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or item.get('author_id') or "Unknown"
 
-                        # 3. Title (🔧 แก้ไขให้รองรับ Instagram ที่ใช้คำว่า caption)
-                        title_raw = item.get('caption') or item.get('text') or item.get('desc') or item.get('title') or "No Title"
+                        # 3. Title (รองรับหลายแพลตฟอร์ม)
+                        title_raw = item.get('caption') or item.get('text') or item.get('desc') or item.get('title') or item.get('video_description') or "No Title"
                         if isinstance(title_raw, dict): title_raw = title_raw.get('text', 'No Title')
                         title = str(title_raw)
 
                         # 4. URL
-                        item_id = item.get('id') or item.get('video', {}).get('id', str(random.randint(1,9999)))
-                        v_url = item.get('webVideoUrl') or item.get('videoWebUrl') or item.get('url') or item.get('postUrl')
-                        if not v_url and plat == 'TikTok' and item_id: 
+                        item_id = item.get('id') or item.get('video', {}).get('id') or item.get('video_id')
+                        if not item_id: item_id = str(random.randint(10000, 99999))
+                        
+                        v_url = item.get('webVideoUrl') or item.get('videoWebUrl') or item.get('url') or item.get('postUrl') or item.get('video_url')
+                        if not v_url and plat == 'TikTok': 
                             v_url = f"https://www.tiktok.com/@{user}/video/{item_id}"
                             
                         # 5. Image
-                        image_url = item.get('displayUrl') or item.get('imageUrl') or item.get('coverUrl') or item.get('video', {}).get('cover')
+                        image_url = item.get('displayUrl') or item.get('imageUrl') or item.get('coverUrl') or item.get('video', {}).get('cover') or item.get('origin_cover')
 
                         if v_url:
                             all_videos.append({
