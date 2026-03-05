@@ -33,10 +33,10 @@ APIFY_TOKEN = os.environ.get("APIFY_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 
-# 🔴 ลิงก์ Webhook Google Chat ของคุณ
+# 🔴 ลิงก์ Webhook Google Chat ของคุณ (ห้องหลัก)
 GOOGLE_CHAT_WEBHOOK = "https://chat.googleapis.com/v1/spaces/AAQAGsvHT0c/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=_gjfX3kZs7NEU6fxNYYTvVkhZFEC7WkwfEdxZ0fvKTw"
 
-# 🔴 WEBHOOK URL ของ Google Chat (ห้อง TikTok เฉพาะ!) **เอาลิงก์ใหม่มาใส่ตรงนี้**
+# 🔴 ลิงก์ Webhook Google Chat ของคุณ (ห้อง TikTok โดยเฉพาะ)
 GOOGLE_CHAT_WEBHOOK_TIKTOK = "https://chat.googleapis.com/v1/spaces/AAQAtSkMPnY/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=WhACImSKOnMpTU-3iyj92I-y6xmDd3KDHZtVY7GehNQ"
 
 BASE_PATH = './'
@@ -73,7 +73,8 @@ def sanitize_for_sheets(text):
     clean_text = clean_text.replace('\n', ' ').strip()
     if clean_text.startswith(('=', '+', '-', '@')):
         clean_text = f"'{clean_text}"
-    return clean_text
+    # 🛡️ จำกัดความยาวข้อความไม่ให้เกิน 2500 ตัวอักษร ป้องกัน Sheet เออเร่อ
+    return clean_text[:2500]
 
 def send_google_chat_message(message, webhook_url):
     """ส่งข้อความเข้า Google Chat ผ่าน Webhook"""
@@ -144,14 +145,12 @@ def predict_logo(model, frame):
     return False, 0.0, None
 
 def save_evidence(image_pil, video_id, timestamp_str):
-    """อัปโหลดรูปลง Google Drive ผ่าน API"""
     try:
         safe_ts = str(timestamp_str).replace(":", "_")
         local_filename = f"DETECT_{video_id}_{safe_ts}.jpg"
         image_pil.save(local_filename)
 
         if not GDRIVE_FOLDER_ID:
-            print("⚠️ ไม่พบ GDRIVE_FOLDER_ID (ยังไม่ได้ตั้งค่าใน Secrets)")
             return "-", "-"
 
         file_metadata = {'name': local_filename, 'parents': [GDRIVE_FOLDER_ID]}
@@ -162,10 +161,8 @@ def save_evidence(image_pil, video_id, timestamp_str):
         
         url = file.get('webViewLink')
         os.remove(local_filename)
-        
         return f'=HYPERLINK("{url}", "🖼️ กดดูรูปภาพ")', url
     except Exception as e: 
-        print(f" ⚠️ Upload Error: {e}")
         return "-", "-"
 
 def fetch_data(platforms, keywords, max_res, days_back):
@@ -194,9 +191,9 @@ def fetch_data(platforms, keywords, max_res, days_back):
                     if plat in ['TikTok', 'Instagram']: inp["hashtags"] = [kw.replace(" ","")]
                     else: inp["searchTerms"] = kw
                     
-                    run = client.actor(actor).call(run_input=inp, timeout_secs=90)
+                    run = client.actor(actor).call(run_input=inp, timeout_secs=120)
                     for item in client.dataset(run["defaultDatasetId"]).list_items().items:
-                        # 1. จัดการวันที่
+                        # 1. Date
                         raw_date = item.get('createTime') or item.get('timestamp') or item.get('date')
                         try:
                             if isinstance(raw_date, (int, float)): dt_utc = datetime.fromtimestamp(raw_date if raw_date < 1e11 else raw_date/1000.0, timezone.utc)
@@ -204,7 +201,7 @@ def fetch_data(platforms, keywords, max_res, days_back):
                             if dt_utc < cutoff_utc: continue 
                         except: pass
 
-                        # 2. จัดการ User
+                        # 2. User
                         user = "Unknown"
                         if isinstance(item.get('authorMeta'), dict):
                             user = item['authorMeta'].get('name') or item['authorMeta'].get('nickName') or "Unknown"
@@ -214,17 +211,18 @@ def fetch_data(platforms, keywords, max_res, days_back):
                         if user == "Unknown":
                             user = item.get('authorNickname') or item.get('authorName') or item.get('ownerUsername') or "Unknown"
 
-                        # 3. จัดการ Title
-                        title = item.get('text') or item.get('desc') or item.get('title') or "No Title"
-                        if isinstance(title, dict): title = str(title)
+                        # 3. Title (🔧 แก้ไขให้รองรับ Instagram ที่ใช้คำว่า caption)
+                        title_raw = item.get('caption') or item.get('text') or item.get('desc') or item.get('title') or "No Title"
+                        if isinstance(title_raw, dict): title_raw = title_raw.get('text', 'No Title')
+                        title = str(title_raw)
 
-                        # 4. จัดการ URL และ ID
+                        # 4. URL
                         item_id = item.get('id') or item.get('video', {}).get('id', str(random.randint(1,9999)))
                         v_url = item.get('webVideoUrl') or item.get('videoWebUrl') or item.get('url') or item.get('postUrl')
                         if not v_url and plat == 'TikTok' and item_id: 
                             v_url = f"https://www.tiktok.com/@{user}/video/{item_id}"
                             
-                        # 5. จัดการ Image URL
+                        # 5. Image
                         image_url = item.get('displayUrl') or item.get('imageUrl') or item.get('coverUrl') or item.get('video', {}).get('cover')
 
                         if v_url:
@@ -282,6 +280,9 @@ def main():
 
     engine = load_ai_model()
     chat_summary = []
+    
+    # 🛒 สร้างตะกร้าสำหรับเก็บข้อมูลที่จะเตรียมยัดลง Sheet พร้อมกัน
+    batch_rows_to_insert = []
 
     if engine is None:
         send_google_chat_message("🚨 [System Error] ไม่พบไฟล์โมเดล AI (bigc_model.pth) ใน GitHub บอทจึงไม่สามารถสแกนโลโก้ได้!", GOOGLE_CHAT_WEBHOOK)
@@ -335,21 +336,28 @@ def main():
             formula, img_url = "-", "-"
             detect_status = "No"
 
-        # 🔧 แถวข้อมูลที่จะบันทึก
+        # 🔧 นำข้อมูลแถวนี้เก็บลงตะกร้า (ยังไม่เขียนลง Sheet ทันที)
         row_data = [
             clean_date, clean_title, clean_platform,
             clean_user, str(detect_status), str(final_ts),
             clean_url, str(formula) 
         ]
+        batch_rows_to_insert.append(row_data)
+        scanned_memory.add(v['url']) if 'scanned_memory' in locals() else None
 
-        try: 
-            ws_data.insert_row(row_data, index=2, value_input_option='USER_ENTERED')
-            print(f"  📝 บันทึกลง Sheet 'Apify' สำเร็จ! (สถานะ: {detect_status})")
-        except Exception as sheet_err: 
+    # 🚀 3. ทำการ BATCH INSERT (เทตะกร้าลง Google Sheets ในคำสั่งเดียว)
+    if batch_rows_to_insert:
+        try:
+            print(f"📦 กำลังบันทึกข้อมูลแบบ Batch จำนวน {len(batch_rows_to_insert)} แถว...")
+            # กลับด้าน list เพื่อให้ตอนยัดลงบรรทัดที่ 2 ข้อมูลใหม่ล่าสุดอยู่บนสุด
+            batch_rows_to_insert.reverse() 
+            ws_data.insert_rows(batch_rows_to_insert, row=2, value_input_option='USER_ENTERED')
+            print("  ✅ บันทึกลง Sheet 'Apify' สำเร็จทั้งหมด!")
+        except Exception as sheet_err:
             print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
 
     # ---------------------------------------------------------
-    # 🔧 3. แจ้งเตือน (ห้องหลักรับหมด, ห้องแยกรับเฉพาะ TikTok)
+    # 🔧 4. แจ้งเตือน (ห้องหลักรับหมด, ห้องแยกรับเฉพาะ TikTok)
     # ---------------------------------------------------------
     
     # ส่งเข้าห้องหลัก (รวมทุกแพลตฟอร์ม)
