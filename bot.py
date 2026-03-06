@@ -305,6 +305,7 @@ def fetch_data(platforms, keywords, max_res, days_back):
     return all_videos
 
 def main():
+    global gc  # 🛡️ ประกาศใช้ gc ที่อยู่นอกฟังก์ชันเพื่อแก้ปัญหา UnboundLocalError
     if not SHEET_ID and 'auth' in globals():
         auth.authenticate_user()
         creds, _ = default()
