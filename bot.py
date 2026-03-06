@@ -296,37 +296,35 @@ def main():
         clean_date = sanitize_for_sheets(v.get('date', '-'))
         clean_url = sanitize_for_sheets(v.get('url', '-'))
         
-        if found:
-            print(f"  🎯 Logo Found!")
+if found:
+            print(f"  🎯 Logo Found at {final_ts}!")
             formula, img_url = save_evidence(best_img, v['id'], final_ts)
             detect_status = "Yes"
             chat_summary.append({'url': clean_url, 'img_url': str(img_url), 'platform': clean_platform})
-        else:
+        else: 
             print("  ❌ No logo.")
             formula, img_url = "-", "-"
             detect_status = "No"
-
+            
         # 🌟 เก็บเวลาปัจจุบันที่บอททำงาน (Timestamp)
         current_run_time = get_bkk_now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # 🔧 นำข้อมูลแถวนี้เก็บลงตะกร้า (เพิ่ม current_run_time ไว้คอลัมน์ที่ 9 ต่อท้ายสุด)
+        # 🔧 นำข้อมูลแถวนี้เก็บลงตะกร้า 
+        # (เพิ่ม "-" เพื่อข้ามคอลัมน์ I และดัน current_run_time ไปอยู่คอลัมน์ J)
         row_data = [
-            clean_date, clean_title, clean_platform,
-            clean_user, str(detect_status), str(final_ts),
-            clean_url, str(formula), current_run_time 
+            clean_date,        # A: Date
+            clean_title,       # B: Title
+            clean_platform,    # C: Platform
+            clean_user,        # D: User
+            str(detect_status),# E: Status
+            str(final_ts),     # F: Timestamp วิดีโอ
+            clean_url,         # G: URL
+            str(formula),      # H: Formula รูปภาพ
+            "-",               # I: (เว้นว่างไว้ เพื่อดันไปคอลัมน์ถัดไป)
+            current_run_time   # J: Timestamp (เวลาที่รันสคริปต์)
         ]
         batch_rows_to_insert.append(row_data)
-
-    # 🚀 3. ทำการ BATCH INSERT (เทตะกร้าลง Google Sheets ในคำสั่งเดียว)
-    if batch_rows_to_insert:
-        try:
-            print(f"📦 กำลังบันทึกข้อมูลแบบ Batch จำนวน {len(batch_rows_to_insert)} แถว...")
-            # กลับด้าน list เพื่อให้ตอนยัดลงบรรทัดที่ 2 ข้อมูลใหม่ล่าสุดอยู่บนสุด
-            batch_rows_to_insert.reverse() 
-            ws_data.insert_rows(batch_rows_to_insert, row=2, value_input_option='USER_ENTERED')
-            print("  ✅ บันทึกลง Sheet 'Apify' สำเร็จทั้งหมด!")
-        except Exception as sheet_err:
-            print(f"  ❌ เขียนลง Sheet 'Apify' ไม่สำเร็จ: {sheet_err}")
+        scanned_memory.add(v['url']) if 'scanned_memory' in locals() else None
 
     # ---------------------------------------------------------
     # 🔧 4. แจ้งเตือน 2 ห้อง
