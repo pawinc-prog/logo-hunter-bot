@@ -37,10 +37,15 @@ from apify_client import ApifyClient
 import cv2
 import torch
 import gspread
-from google.colab import drive, auth
-from google.auth import default
 from PIL import Image
 from torchvision import transforms
+
+# 🛡️ ป้องกัน Error เวลาไม่ได้รันบน Colab
+try:
+    from google.colab import drive, auth
+    from google.auth import default
+except ImportError:
+    pass # ถ้ารันบน GitHub จะข้ามส่วนนี้ไปเลย ไม่ทำให้ระบบพัง
 
 # ==========================================
 # 🔑 ดึง API Keys จาก Environment (รองรับการใส่หลายคีย์คั่นด้วย ,)
