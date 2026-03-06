@@ -430,9 +430,9 @@ def main():
 
                 # 🔧 นำข้อมูลแถวนี้เก็บลงตะกร้า (แทรก '-' เพื่อดัน Timestamp ไปอยู่คอลัมน์ J)
                 row_data = [
-                    clean_date, clean_title, clean_platform,
-                    clean_user, str(detect_status), str(final_ts),
-                    clean_url, str(formula), "-", current_run_time
+                clean_date, clean_title, clean_platform,
+                clean_user, str(detect_status), str(final_ts),
+                clean_url, str(formula), "FALSE", current_run_time  # <--- เปลี่ยนตรงนี้ได้
                 ]
                 batch_rows_to_insert.append(row_data)
                 scanned_memory.add(v['url'])
